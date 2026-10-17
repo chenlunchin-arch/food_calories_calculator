@@ -79,6 +79,15 @@ input[type=number],input[type=password],input[type=text],select{font:inherit;wid
 .total .sub{font-size:12px;color:var(--muted)}
 .toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 16px;border-radius:99px;font-size:14px;z-index:5}
 footer{font-size:12px;color:var(--muted)}
+.alts{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;color:var(--muted)}
+.alts button{padding:3px 10px;font-size:12px;border-radius:99px;background:var(--cobalt-soft);border-color:transparent;color:var(--cobalt)}
+.mode{display:grid;gap:8px}
+.mode label{display:flex;gap:10px;align-items:flex-start;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--bg);font-size:14px}
+.mode label:has(input:checked){border-color:var(--cobalt);background:var(--cobalt-soft)}
+.mode input{margin-top:4px;accent-color:var(--cobalt)}
+.mode small{display:block;color:var(--muted);font-size:12px}
+.learned{font-size:13px;color:var(--muted)}
+[hidden]{display:none!important}
 </style>
 </head>
 <body>
@@ -121,7 +130,7 @@ footer{font-size:12px;color:var(--muted)}
         <button id="addBtn">加入</button>
       </div>
     </section>
-    <footer>熱量為常見做法的估計值，實際會因份量、油量和食譜而不同。照片估算重量誤差約 ±20–30%，旁邊放筷子或手機當比例尺會更準。</footer>
+    <footer>飯前、飯後盡量用差不多的角度和距離拍，整個盤子入鏡，剩下的比例會比較準。份量用常見的一份帶入，跟實際不同時請直接改公克數。你修正過、存入今天的菜，下次會認得更準。</footer>
   </div>
 
   <!-- 今日 -->
@@ -135,21 +144,37 @@ footer{font-size:12px;color:var(--muted)}
 
   <!-- 設定 -->
   <div id="tab-settings" hidden>
-    <div class="card">
-      <h2>照片估算設定</h2>
-      <p>照片估算使用 Claude API。請到 console.anthropic.com 建立 API 金鑰後貼在這裡。金鑰只存在這支手機上，每次估算會從你的 API 帳戶扣少量費用。</p>
-      <label class="field">API 金鑰<input type="password" id="apiKey" placeholder="sk-ant-…" autocomplete="off"></label>
-      <label class="field">模型
-        <select id="model">
-          <option value="claude-sonnet-5-5">Claude Sonnet 5.5（建議，速度與準度平衡）</option>
-          <option value="claude-opus-5-5">Claude Opus 5.5（最準，較慢、較貴）</option>
-          <option value="claude-haiku-5-5">Claude Haiku 5.5（最快、最便宜）</option>
-        </select>
-      </label>
+    <div style="display:grid;gap:16px">
+      <div class="card">
+        <h2>辨識方式</h2>
+        <div class="mode">
+          <label><input type="radio" name="mode" id="modeOffline" value="offline"><span><b>手機離線辨識（免費）</b><small>在手機上直接辨識，不用網路、不用付費，4GB 記憶體的手機也能用。</small></span></label>
+          <label><input type="radio" name="mode" id="modeApi" value="api"><span><b>Claude API（較準，需付費）</b><small>照片傳給 Claude 辨識，認菜和估份量都比較準，要自備 API 金鑰。</small></span></label>
+        </div>
+      </div>
+      <div class="card" id="apiCard">
+        <h2>Claude API 設定</h2>
+        <p>到 console.anthropic.com 建立 API 金鑰後貼在這裡。金鑰只存在這支手機上，每次估算會從你的 API 帳戶扣少量費用。</p>
+        <label class="field">API 金鑰<input type="password" id="apiKey" placeholder="sk-ant-…" autocomplete="off"></label>
+        <label class="field">模型
+          <select id="model">
+            <option value="claude-haiku-5-5">Claude Haiku 5.5（最便宜、最快）</option>
+            <option value="claude-sonnet-5-5">Claude Sonnet 5.5（準度與速度平衡）</option>
+            <option value="claude-opus-5-5">Claude Opus 5.5（最準、最貴）</option>
+          </select>
+        </label>
+      </div>
+      <div class="card">
+        <h2>學過的菜</h2>
+        <p class="learned" id="learnedInfo"></p>
+        <div class="row-actions"><button id="forgetBtn">清除學習紀錄</button><span class="status" id="forgetStatus"></span></div>
+      </div>
       <div class="row-actions"><button class="primary" id="saveKey">儲存設定</button><span class="status" id="keyStatus"></span></div>
     </div>
   </div>
 </div>
+
+<datalist id="foodNames"></datalist>
 
 <div class="total" id="totalBar">
   <div class="total-in">
@@ -162,31 +187,49 @@ footer{font-size:12px;color:var(--muted)}
   </div>
 </div>
 
+<script src="engine.js"></script>
 <script>
-// kcal per 100 g, typical serving in grams
-const FOODS = [
-  ["白飯",183,200],["糙米飯",165,200],["滷肉飯",230,250],["雞腿便當(含飯)",180,550],["排骨便當(含飯)",190,550],
-  ["炒飯",180,300],["炒麵",170,300],["牛肉麵(含湯)",85,700],["陽春麵(含湯)",70,500],["水餃",230,250],
-  ["鍋貼",250,200],["小籠包",220,200],["肉包",240,120],["饅頭",230,100],["蛋餅",210,150],
-  ["蘿蔔糕",160,150],["油條",390,60],["燒餅",320,90],["吐司",265,60],["三明治",230,150],
-  ["漢堡",250,220],["薯條",310,120],["炸雞",290,180],["鹽酥雞",290,150],["滷蛋",150,55],
-  ["荷包蛋",200,50],["煎鮭魚",210,120],["烤雞胸",165,120],["炸排骨",280,150],["滷雞腿",210,180],
-  ["燙青菜",45,150],["炒青菜",90,150],["生菜沙拉(無醬)",20,150],["豆腐",80,150],["麻婆豆腐",130,200],
-  ["味噌湯",30,250],["玉米濃湯",70,250],["珍珠奶茶(全糖)",75,700],["香蕉",90,120],["蘋果",52,200],
-  ["蛋糕",380,100],["冰淇淋",210,100],["義大利麵(紅醬)",150,350],["咖哩飯",160,450],["拉麵(含湯)",95,650]
-];
 const $ = s => document.querySelector(s);
 const num = v => Math.max(0, Number(v) || 0);
 const r = n => Math.round(n);
 const store = {
   get(k, d){ try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+  set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } }
 };
+
+/* ---------- food list: from the model's labels, plus dishes the user taught ---------- */
+// Used only when the model files are missing (e.g. opened in a browser)
+const FALLBACK = [["白飯",183,200],["滷肉飯",230,250],["雞腿便當",180,550],["排骨便當",190,550],["炒飯",180,300],["牛肉麵",85,700],["水餃",230,250],["燙青菜",45,150],["滷蛋",150,55],["味噌湯",30,250]];
+let LABELS = null;          // parsed model/labels.json
+let CLASSES = null;         // PlateEngine.buildClasses(...)
+let learned = store.get("learned", {});
+let foodsByName = new Map();
+
+function rebuildFoods(){
+  foodsByName = new Map();
+  const base = LABELS ? LABELS.foods.map(f => [f.zh, f.kcal, f.g]) : FALLBACK;
+  for (const [zh,k,g] of base) foodsByName.set(zh, {k, g});
+  for (const [name, l] of Object.entries(learned)) if (!foodsByName.has(name)) foodsByName.set(name, {k:l.kcal, g:l.g, custom:true});
+  const names = [...foodsByName.keys()];
+  $("#pick").innerHTML = `<option value="">從清單加入食物…</option>` +
+    names.map(n => `<option>${esc(n)}</option>`).join("") + `<option value="__custom">自訂食物</option>`;
+  $("#foodNames").innerHTML = names.map(n => `<option value="${esc(n)}"></option>`).join("");
+  if (LABELS) CLASSES = PlateEngine.buildClasses(LABELS, learned);
+  const n = Object.keys(learned).length;
+  $("#learnedInfo").textContent = n ? `已學過 ${n} 道菜：${Object.keys(learned).slice(0,12).join("、")}${n>12?"…":""}` : "還沒有學過的菜。估算後修正菜名並按「存入今天」，App 就會記住這道菜的樣子。";
+}
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+const offlineReady = () => !!(LABELS && window.PlateNative && PlateNative.available());
+fetch("model/labels.json").then(res => res.ok ? res.json() : null).then(j => { if (j) LABELS = j; }).catch(() => {})
+  .finally(() => { rebuildFoods(); updateAnalyze(); });
+
+/* ---------- meal items ---------- */
 const EXAMPLE = () => [
-  {name:"滷肉飯",k:230,before:250,after:40,conf:null},
-  {name:"燙青菜",k:45,before:150,after:0,conf:null},
-  {name:"滷蛋",k:150,before:55,after:0,conf:null},
-  {name:"味噌湯",k:30,before:250,after:120,conf:null}
+  {name:"滷肉飯",k:230,before:250,after:40},
+  {name:"燙青菜",k:45,before:150,after:0},
+  {name:"滷蛋",k:150,before:55,after:0},
+  {name:"味噌湯",k:30,before:250,after:120}
 ];
 let items = EXAMPLE();
 let isExample = true;
@@ -206,13 +249,24 @@ function showTab(name){
   if(name === "today") renderToday();
 }
 
-/* ---------- ledger ---------- */
 const eatenOf = it => Math.max(0, it.before - Math.min(it.after, it.before));
 function totals(){
   const before = items.reduce((s,it)=>s+it.before*it.k/100,0);
   const eaten = items.reduce((s,it)=>s+eatenOf(it)*it.k/100,0);
   return {before, eaten};
 }
+function touched(){ isExample = false; }
+
+// Switch an item to another dish, keeping the share that was left over
+function renameItem(it, name){
+  const f = foodsByName.get(name);
+  const leftShare = it.before ? Math.min(1, it.after / it.before) : 0;
+  it.name = name;
+  if (f) { it.k = f.k; it.before = f.g; it.after = Math.round(f.g * leftShare); }
+  it.conf = null;
+  it.alts = (it.alts || []).filter(a => a !== name);
+}
+
 function render(){
   const L = $("#ledger"); L.textContent = "";
   items.forEach((it,i) => {
@@ -221,10 +275,11 @@ function render(){
     const el = document.createElement("div"); el.className = "item";
     el.innerHTML = `
       <div class="item-top">
-        <input class="name" type="text" aria-label="食物名稱">
-        ${it.conf ? `<span class="conf ${it.conf}">${{high:"把握高",mid:"把握中",low:"把握低"}[it.conf]}</span>` : ""}
+        <input class="name" type="text" list="foodNames" aria-label="食物名稱">
+        ${it.conf ? `<span class="conf ${it.conf}">${{high:"把握高",mid:"把握中",low:"不太確定"}[it.conf]}</span>` : ""}
         <button class="del" aria-label="刪除">×</button>
       </div>
+      ${it.alts && it.alts.length ? `<div class="alts">也可能是：${it.alts.map(a => `<button data-alt="${esc(a)}">${esc(a)}</button>`).join("")}</div>` : ""}
       <div class="fields">
         <label>飯前 (g)<input data-f="before" type="number" inputmode="decimal" min="0"></label>
         <label>剩下 (g)<input data-f="after" type="number" inputmode="decimal" min="0"></label>
@@ -235,13 +290,14 @@ function render(){
       <div class="item-foot"><span>吃了 ${r(eatenG)} g・${r(pct*100)}%</span><span class="kcal">${r(eatenG*it.k/100)} 大卡</span></div>`;
     const name = el.querySelector(".name");
     name.value = it.name;
-    name.onchange = () => { it.name = name.value; isExample = false; $("#exampleTag").hidden = true; };
+    name.onchange = () => { const v = name.value.trim(); if (!v) return; renameItem(it, v); touched(); render(); };
+    el.querySelectorAll("[data-alt]").forEach(b => b.onclick = () => { renameItem(it, b.dataset.alt); touched(); render(); });
     el.querySelectorAll("[data-f]").forEach(inp => {
       inp.value = r(it[inp.dataset.f]);
-      inp.onchange = () => { it[inp.dataset.f] = num(inp.value); isExample = false; render(); };
+      inp.onchange = () => { it[inp.dataset.f] = num(inp.value); touched(); render(); };
     });
-    el.querySelector(".del").onclick = () => { items.splice(i,1); isExample = false; render(); };
-    el.querySelectorAll(".quick button").forEach(b => b.onclick = () => { it.after = it.before * Number(b.dataset.p); isExample = false; render(); });
+    el.querySelector(".del").onclick = () => { items.splice(i,1); touched(); render(); };
+    el.querySelectorAll(".quick button").forEach(b => b.onclick = () => { it.after = it.before * Number(b.dataset.p); touched(); render(); });
     L.append(el);
   });
   const t = totals();
@@ -250,14 +306,12 @@ function render(){
   $("#exampleTag").hidden = !isExample;
 }
 
-const pick = $("#pick");
-pick.innerHTML = `<option value="">從常見食物加入…</option>` + FOODS.map((f,i)=>`<option value="${i}">${f[0]}（${f[1]} 大卡/100g）</option>`).join("") + `<option value="custom">自訂食物</option>`;
 $("#addBtn").onclick = () => {
-  const v = pick.value; if(!v) return;
+  const v = $("#pick").value; if(!v) return;
   if(isExample){ items = []; isExample = false; }
-  if(v === "custom") items.push({name:"自訂食物",k:100,before:100,after:0,conf:null});
-  else { const f = FOODS[v]; items.push({name:f[0],k:f[1],before:f[2],after:0,conf:null}); }
-  pick.value = ""; render();
+  if(v === "__custom") items.push({name:"自訂食物",k:100,before:100,after:0});
+  else { const f = foodsByName.get(v); items.push({name:v,k:f.k,before:f.g,after:0}); }
+  $("#pick").value = ""; render();
 };
 
 /* ---------- photos ---------- */
@@ -282,32 +336,97 @@ $("#clearPhotos").onclick = () => {
   updateAnalyze();
 };
 
+const mode = () => store.get("mode", "offline");
 function setStatus(t, err=false){ const s=$("#status"); s.textContent=t; s.classList.toggle("err",err); }
-function updateAnalyze(){
-  const key = store.get("apiKey","");
-  $("#analyze").disabled = !(key && files.before);
-  if(!key) setStatus("要用照片估算，請先到「設定」貼上 API 金鑰。也可以直接用下方清單手動輸入。");
+let busy = false;
+function updateAnalyze(keepStatus=false){
+  const ready = mode() === "api" ? !!store.get("apiKey","") : offlineReady();
+  $("#analyze").disabled = busy || !(ready && files.before);
+  if (busy || keepStatus) return;
+  if (!ready) setStatus(mode() === "api"
+    ? "要用 Claude API 估算，請先到「設定」貼上 API 金鑰。也可以用下方清單手動輸入。"
+    : "這個版本沒有包含離線辨識模型，請用下方清單手動輸入，或到「設定」改用 Claude API。");
   else if(!files.before) setStatus("放入飯前照片後即可估算。沒有飯後照片時，會當成全部吃完。");
   else setStatus(files.after ? "兩張照片都好了。" : "只有飯前照片，會當成全部吃完。");
 }
 
-// Shrink to ~1568 px on the long edge and return base64 JPEG (no prefix)
-function toJpegBase64(file){
+function loadImage(file){
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.onload = () => {
-      const max = 1568, s = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
-      const c = document.createElement("canvas");
-      c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
-      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-      URL.revokeObjectURL(img.src);
-      resolve(c.toDataURL("image/jpeg", 0.85).split(",")[1]);
-    };
+    img.onload = () => resolve(img);
     img.onerror = () => reject(new Error("image"));
     img.src = URL.createObjectURL(file);
   });
 }
 
+/* ---------- offline recognition ---------- */
+const pending = new Map();
+window.__plateEmbed = (id, res) => {
+  const p = pending.get(id); if (!p) return;
+  pending.delete(id);
+  if (res && res.ok) p.resolve(res.emb.map(e => Float32Array.from(e)));
+  else p.reject(new Error((res && res.error) || "model"));
+};
+let seq = 0;
+function embedNative(rgb){
+  let bin = "";
+  for (let i = 0; i < rgb.length; i += 0x8000) bin += String.fromCharCode.apply(null, rgb.subarray(i, i + 0x8000));
+  const id = "e" + (++seq);
+  return new Promise((resolve, reject) => {
+    pending.set(id, {resolve, reject});
+    PlateNative.embed(id, btoa(bin));
+  });
+}
+
+// Cuts the photo into the whole view + a grid of tiles and gets an embedding for each
+async function embedPhoto(file){
+  const img = await loadImage(file);
+  const scale = Math.min(1, 1024 / Math.max(img.naturalWidth, img.naturalHeight));
+  const src = document.createElement("canvas");
+  src.width = Math.round(img.naturalWidth * scale); src.height = Math.round(img.naturalHeight * scale);
+  const sctx = src.getContext("2d");
+  sctx.imageSmoothingQuality = "high";
+  sctx.drawImage(img, 0, 0, src.width, src.height);
+  URL.revokeObjectURL(img.src);
+
+  const S = 256;
+  const boxes = PlateEngine.cropBoxes(src.width, src.height);
+  const tile = document.createElement("canvas"); tile.width = tile.height = S;
+  const tctx = tile.getContext("2d", {willReadFrequently:true});
+  tctx.imageSmoothingQuality = "high";
+  const rgb = new Uint8Array(boxes.length * S * S * 3);
+  boxes.forEach((b, k) => {
+    tctx.drawImage(src, b.x, b.y, b.s, b.s, 0, 0, S, S);
+    PlateEngine.rgbaToRgb(tctx.getImageData(0, 0, S, S).data, rgb, k * S * S * 3);
+  });
+  const embs = await embedNative(rgb);
+  return {full: embs[0], tiles: embs.slice(1)};
+}
+
+async function analyzeOffline(){
+  setStatus("辨識飯前照片中…");
+  const before = await embedPhoto(files.before);
+  let after = null;
+  if (files.after) { setStatus("辨識飯後照片中…"); after = await embedPhoto(files.after); }
+  const res = PlateEngine.analyse(CLASSES, before, after);
+  items = res.items.map(x => ({name:x.name, k:x.kcal, before:x.before, after:x.after, conf:x.conf, alts:x.alts, emb:x.emb}));
+  isExample = false; render();
+  $("#aiNote").textContent = "離線辨識的菜名和份量是粗估。菜名不對請點「也可能是」或直接改名；份量不對請改公克數。按「存入今天」後，App 會記住你修正過的菜。";
+  $("#aiNote").hidden = false;
+  setStatus("辨識完成，請確認下方的菜名和份量。");
+}
+
+/* ---------- Claude API ---------- */
+function toJpegBase64(file){
+  return loadImage(file).then(img => {
+    const max = 1568, s = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement("canvas");
+    c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(img.src);
+    return c.toDataURL("image/jpeg", 0.85).split(",")[1];
+  });
+}
 function parseJson(text){
   try { return JSON.parse(text); } catch {}
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -316,9 +435,7 @@ function parseJson(text){
   if(a >= 0 && b > a) try { return JSON.parse(text.slice(a, b+1)); } catch {}
   return null;
 }
-
-$("#analyze").onclick = async () => {
-  const btn = $("#analyze"); btn.disabled = true;
+async function analyzeApi(){
   setStatus("正在看照片，約需 10–40 秒…");
   const both = !!files.after;
   const prompt = `你是營養師。${both ? "第一張照片是用餐前的餐點，第二張是同一份餐點用餐後剩下的樣子。" : "這張照片是用餐前的餐點，假設全部吃完。"}
@@ -330,69 +447,73 @@ $("#analyze").onclick = async () => {
 以餐具、碗盤大小作為比例參考。食物名稱用繁體中文。
 只回覆 JSON，不要其他文字，格式：
 {"items":[{"name":"滷肉飯","before_g":250,"after_g":40,"kcal_per_100g":230,"confidence":"mid"}],"note":"一句話說明估算依據或注意事項"}`;
-  try {
-    const imgs = both ? [files.before, files.after] : [files.before];
-    const content = [];
-    for (const [i, f] of imgs.entries()) {
-      content.push({type:"text", text: i === 0 ? "【飯前】" : "【飯後】"});
-      content.push({type:"image", source:{type:"base64", media_type:"image/jpeg", data: await toJpegBase64(f)}});
-    }
-    content.push({type:"text", text: prompt});
+  const imgs = both ? [files.before, files.after] : [files.before];
+  const content = [];
+  for (const [i, f] of imgs.entries()) {
+    content.push({type:"text", text: i === 0 ? "【飯前】" : "【飯後】"});
+    content.push({type:"image", source:{type:"base64", media_type:"image/jpeg", data: await toJpegBase64(f)}});
+  }
+  content.push({type:"text", text: prompt});
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {"content-type":"application/json","x-api-key":store.get("apiKey",""),
+      "anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+    body: JSON.stringify({model: store.get("model","claude-haiku-5-5"), max_tokens: 2000, messages:[{role:"user", content}]})
+  });
+  const body = await res.json().catch(() => ({}));
+  if(!res.ok){
+    const msg = {401:"API 金鑰不正確，請到「設定」重新貼上。",403:"這把金鑰沒有使用權限。",404:"找不到這個模型，請到「設定」換一個。",429:"太頻繁了，請稍等一下再試。",529:"服務忙碌中，請稍後再試。"}[res.status];
+    throw new Error(msg || `估算失敗（${res.status}）：${body?.error?.message || "請稍後再試"}`);
+  }
+  const text = (body.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+  const data = parseJson(text);
+  const list = Array.isArray(data?.items) ? data.items : [];
+  if(!list.length) throw new Error("照片裡沒有辨識到食物，請換一張或手動加入。");
+  items = list.map(x => ({
+    name: String(x.name || "食物"), before: num(x.before_g), after: num(x.after_g), k: num(x.kcal_per_100g),
+    conf: ["high","mid","low"].includes(x.confidence) ? x.confidence : null
+  }));
+  isExample = false; render();
+  $("#aiNote").textContent = data.note ? String(data.note) : "";
+  $("#aiNote").hidden = !data.note;
+  setStatus("估算完成，可以直接修改下方的數字。");
+}
 
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": store.get("apiKey",""),
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true"
-      },
-      body: JSON.stringify({
-        model: store.get("model","claude-sonnet-5-5"),
-        max_tokens: 2000,
-        messages: [{role:"user", content}]
-      })
-    });
-    const body = await res.json().catch(() => ({}));
-    if(!res.ok){
-      const msg = {401:"API 金鑰不正確，請到「設定」重新貼上。",403:"這把金鑰沒有使用權限。",404:"找不到這個模型，請到「設定」換一個。",429:"太頻繁了，請稍等一下再試。",529:"服務忙碌中，請稍後再試。"}[res.status];
-      throw new Error(msg || `估算失敗（${res.status}）：${body?.error?.message || "請稍後再試"}`);
-    }
-    const text = (body.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-    const data = parseJson(text);
-    const list = Array.isArray(data?.items) ? data.items : [];
-    if(!list.length) throw new Error("照片裡沒有辨識到食物，請換一張或手動加入。");
-    items = list.map(x => ({
-      name: String(x.name || "食物"),
-      before: num(x.before_g), after: num(x.after_g), k: num(x.kcal_per_100g),
-      conf: ["high","mid","low"].includes(x.confidence) ? x.confidence : null
-    }));
-    isExample = false; render();
-    const note = $("#aiNote");
-    note.textContent = data.note ? String(data.note) : "";
-    note.hidden = !data.note;
-    setStatus("估算完成，可以直接修改下方的數字。");
+$("#analyze").onclick = async () => {
+  busy = true; $("#analyze").disabled = true;
+  try {
+    if (mode() === "api") await analyzeApi(); else await analyzeOffline();
   } catch(e) {
     const offline = e instanceof TypeError;
-    setStatus(offline ? "連不上網路，請確認網路後再試。" : (e.message === "image" ? "照片無法讀取，請換一張。" : e.message), true);
-  } finally {
-    $("#analyze").disabled = !(store.get("apiKey","") && files.before);
-  }
+    setStatus(offline ? "連不上網路，請確認網路後再試。"
+      : e.message === "image" ? "照片無法讀取，請換一張。"
+      : /OutOfMemory|memory/i.test(e.message) ? "手機記憶體不足，請關掉其他 App 後再試。"
+      : e.message.startsWith("估算") || /[一-鿿]/.test(e.message) ? e.message
+      : "辨識失敗，請再試一次或手動輸入。", true);
+  } finally { busy = false; updateAnalyze(true); }
 };
 
-/* ---------- today log ---------- */
+/* ---------- today log + learning ---------- */
 const dayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 $("#saveMeal").onclick = () => {
   if(!items.length){ toast("這餐還沒有食物"); return; }
   if(isExample){ toast("這是範例資料，請先拍照或加入食物"); return; }
   const log = store.get("log", {});
   const k = dayKey();
-  (log[k] ||= []).push({
-    time: new Date().toTimeString().slice(0,5),
-    kcal: r(totals().eaten),
-    foods: items.map(it => it.name).join("、")
-  });
+  (log[k] ||= []).push({ time: new Date().toTimeString().slice(0,5), kcal: r(totals().eaten), foods: items.map(it => it.name).join("、") });
   store.set("log", log);
+
+  // Remember what each confirmed dish looks like
+  let taught = 0;
+  for (const it of items) {
+    if (!it.emb || !it.name.trim()) continue;
+    PlateEngine.learn(learned, it.name.trim(), it.k, it.before || 100, it.emb);
+    it.emb = null; taught++;
+  }
+  if (taught) {
+    if (!store.set("learned", learned)) toast("儲存空間不足，這次沒有記住菜的樣子");
+    rebuildFoods();
+  }
   toast(`已存入今天：${r(totals().eaten)} 大卡`);
 };
 function renderToday(){
@@ -413,16 +534,32 @@ function renderToday(){
 }
 
 /* ---------- settings ---------- */
+function syncSettings(){
+  $(mode() === "api" ? "#modeApi" : "#modeOffline").checked = true;
+  $("#apiCard").hidden = mode() !== "api";
+}
+document.querySelectorAll('input[name="mode"]').forEach(rb => rb.onchange = () => { $("#apiCard").hidden = !$("#modeApi").checked; });
 $("#apiKey").value = store.get("apiKey","");
-$("#model").value = store.get("model","claude-sonnet-5-5");
+$("#model").value = store.get("model","claude-haiku-5-5");
 $("#saveKey").onclick = () => {
+  store.set("mode", $("#modeApi").checked ? "api" : "offline");
   store.set("apiKey", $("#apiKey").value.trim());
   store.set("model", $("#model").value);
   $("#keyStatus").textContent = "已儲存";
   setTimeout(() => $("#keyStatus").textContent = "", 1500);
   updateAnalyze();
 };
+let forgetArmed = false;
+$("#forgetBtn").onclick = () => {
+  if (!forgetArmed) { forgetArmed = true; $("#forgetBtn").textContent = "再按一次確認清除"; setTimeout(() => { forgetArmed = false; $("#forgetBtn").textContent = "清除學習紀錄"; }, 3000); return; }
+  learned = {}; store.set("learned", learned); rebuildFoods();
+  forgetArmed = false; $("#forgetBtn").textContent = "清除學習紀錄";
+  $("#forgetStatus").textContent = "已清除";
+  setTimeout(() => $("#forgetStatus").textContent = "", 1500);
+};
 
+syncSettings();
+rebuildFoods();
 render();
 updateAnalyze();
 </script>

@@ -32,4 +32,5 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.webkit:webkit:1.11.0")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
 }

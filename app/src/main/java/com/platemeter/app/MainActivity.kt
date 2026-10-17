@@ -45,6 +45,7 @@ class MainActivity : Activity() {
             settings.allowContentAccess = true
         }
         setContentView(webView)
+        webView.addJavascriptInterface(FoodEmbedder(this, webView), "PlateNative")
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
