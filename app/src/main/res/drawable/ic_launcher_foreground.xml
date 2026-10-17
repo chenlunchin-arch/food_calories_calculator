@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A blue-and-white plate with a bite taken out -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M54,24a30,30 0,1 0,0.01 0z" />
+    <path android:fillColor="#00000000" android:strokeColor="#1F4FA3" android:strokeWidth="3"
+        android:pathData="M54,32a22,22 0,1 0,0.01 0z" />
+    <path android:fillColor="#1F4FA3"
+        android:pathData="M54,40a14,14 0,0 1,14 14L54,54z" />
+    <path android:fillColor="#C9D4E6"
+        android:pathData="M54,54L68,54a14,14 0,1 1,-14 -14z" />
+</vector>
