@@ -50,6 +50,15 @@ class FoodEmbedder(private val context: Context, private val webView: WebView) {
         return s
     }
 
+    /** Frees the model and the worker thread (called when the screen is destroyed). */
+    fun close() {
+        worker.execute {
+            try { session?.close() } catch (_: Exception) {}
+            session = null
+        }
+        worker.shutdown()
+    }
+
     /** True when the model file is packaged in this build. */
     @JavascriptInterface
     fun available(): Boolean = try {
@@ -64,7 +73,12 @@ class FoodEmbedder(private val context: Context, private val webView: WebView) {
      */
     @JavascriptInterface
     fun embed(id: String, rgbBase64: String) {
-        worker.execute {
+        if (worker.isShutdown) return
+        try { worker.execute { runEmbed(id, rgbBase64) } } catch (_: java.util.concurrent.RejectedExecutionException) {}
+    }
+
+    private fun runEmbed(id: String, rgbBase64: String) {
+        run {
             val reply = try {
                 val bytes = Base64.decode(rgbBase64, Base64.DEFAULT)
                 val per = SIZE * SIZE * 3

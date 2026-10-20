@@ -12,6 +12,11 @@
   const EX_WEIGHT = 40;      // logit bonus per unit of similarity above the floor
   const MAX_DISHES = 4;
   const MAX_EXAMPLES = 6;
+  const SAME_DISH = 0.85;    // text embeddings closer than this count as the same dish
+  const MAX_GRID = 5;
+  const FULL_SHARE = 0.8;    // normal servings together cover about 80% of the plate
+  const PORTION_MIN = 0.5, PORTION_MAX = 1.5;
+  const FRAMING_DIFF = 0.4;  // plate area differing by more than 40% between photos -> warn
 
   function dot(a, b) {
     let s = 0;
@@ -59,20 +64,24 @@
    * Builds the class list.
    * labels:  parsed labels.json  {scale, foods:[{zh,kcal,g,emb}], nonfood:[{id,emb}]}
    * learned: {name: {kcal, g, ex:[base64 float32, ...]}}  (user-confirmed photos)
+   * mine:    {name: {k, g}}  the user's own calories / typical serving for a dish
    */
-  function buildClasses(labels, learned) {
+  function buildClasses(labels, learned, mine) {
     learned = learned || {};
+    mine = mine || {};
     const classes = [];
     const seen = new Set();
     for (const f of labels.foods) {
       const l = learned[f.zh];
-      classes.push({ name: f.zh, food: true, kcal: f.kcal, g: f.g, text: Float32Array.from(f.emb),
+      const m = mine[f.zh] || {};
+      classes.push({ name: f.zh, food: true, kcal: m.k || f.kcal, g: m.g || f.g, text: Float32Array.from(f.emb),
                      ex: l && l.ex ? l.ex.map(b64ToF32) : [] });
       seen.add(f.zh);
     }
     for (const [name, l] of Object.entries(learned)) {
       if (seen.has(name) || !l || !l.ex || !l.ex.length) continue;
-      classes.push({ name, food: true, kcal: l.kcal, g: l.g, text: null, ex: l.ex.map(b64ToF32), custom: true });
+      const m = mine[name] || {};
+      classes.push({ name, food: true, kcal: m.k || l.kcal, g: m.g || l.g, text: null, ex: l.ex.map(b64ToF32), custom: true });
     }
     for (const n of labels.nonfood) {
       classes.push({ name: n.id, food: false, kind: n.id, text: Float32Array.from(n.emb), ex: [] });
@@ -134,15 +143,29 @@
     for (const ci of foodIdx) {
       if (fullP[ci] >= 0.2) score.set(ci, (score.get(ci) || 0) + 3 * fullP[ci]);
     }
+    // Nothing on the photo looks like food, and the whole photo is a plate/table -> say so.
+    const bestFull = foodIdx.reduce((bi, ci) => (fullP[ci] > fullP[bi] ? ci : bi), foodIdx[0]);
+    if (foodTiles === 0 && !L[argmax(fullP)].food) return { items: [], noFood: true };
+
     const minTiles = Math.max(1, Math.round(foodTiles * 0.12));
-    let picked = [...score.entries()]
-      .filter(([ci]) => (count.get(ci) || 0) >= minTiles || fullP[ci] >= 0.2)
+    const avgP = ci => (score.get(ci) || 0) / Math.max(1, count.get(ci) || 0);
+    const candidates = [...score.entries()]
+      .filter(([ci]) => {
+        const n = count.get(ci) || 0;
+        if (fullP[ci] >= 0.2) return true;
+        if (n < minTiles) return false;
+        return n >= 2 || avgP(ci) >= 0.4;   // a single tile must be a confident match
+      })
       .sort((a, b) => b[1] - a[1])
-      .slice(0, MAX_DISHES)
       .map(([ci]) => ci);
-    if (!picked.length) {
-      picked = [foodIdx.reduce((bi, ci) => (fullP[ci] > fullP[bi] ? ci : bi), foodIdx[0])];
+    // Look-alike dishes (白飯 / 糙米飯 / 五穀飯) are one dish, not several: keep the strongest.
+    let picked = [];
+    for (const ci of candidates) {
+      if (picked.length >= MAX_DISHES) break;
+      const dup = picked.some(pi => L[pi].text && L[ci].text && dot(L[pi].text, L[ci].text) > SAME_DISH);
+      if (!dup) picked.push(ci);
     }
+    if (!picked.length) picked = [bestFull];
 
     // 2. Re-label tiles using only the picked dishes + plate/table, so every food tile
     //    belongs to one of the dishes we show.
@@ -168,8 +191,27 @@
     let afterFull = null;
     if (after) afterFull = probs(classes, after.full, allowed);
 
+    // Photos taken from very different distances make the leftover share unreliable.
+    let framing = false;
+    if (after) {
+      const pa = plateArea(bTiles), pb = plateArea(aTiles);
+      framing = pa >= 3 && Math.abs(pb - pa) / pa > FRAMING_DIFF;  // incl. plate barely visible after
+    }
+    const beforeArea = plateArea(bTiles);
+    // Expected share of each dish: split FULL_SHARE by typical serving size (rice > egg)
+    // Only dishes that own tiles count; one picked from the whole photo alone has no area.
+    const sumG = picked.filter(pi => share(bTiles, pi) > 0).reduce((s, pi) => s + (L[pi].g || 100), 0) || 1;
+
     const items = picked.map(ci => {
       const c = L[ci];
+      // portion: scale the typical serving by how much of the plate this dish covers
+      const sbShare = share(bTiles, ci);
+      let portion = 1;
+      if (beforeArea >= 3 && sbShare > 0) {
+        const expected = FULL_SHARE * (c.g || 100) / sumG;
+        portion = Math.min(PORTION_MAX, Math.max(PORTION_MIN, sbShare / expected));
+      }
+      const grams = Math.max(10, Math.round(c.g * portion / 10) * 10);
       // leftover ratio
       let left = 0;
       if (after) {
@@ -190,24 +232,62 @@
       const mine = bTiles.map((r, t) => (r.ci === ci ? t : -1)).filter(t => t >= 0);
       const agg = new Array(L.length).fill(0);
       const src = mine.length ? mine.map(t => tileP[t]) : [fullP];
-      for (const p of src) for (const fi of foodIdx) agg[fi] += p[fi];
-      for (const fi of foodIdx) agg[fi] += fullP[fi];
-      const total = foodIdx.reduce((s, fi) => s + agg[fi], 0) || 1;
+      for (const p of src) for (let k = 0; k < L.length; k++) agg[k] += p[k];
+      for (let k = 0; k < L.length; k++) agg[k] += fullP[k];
+      // Confidence counts plate/table too, so a dish guessed from a mostly empty photo scores low.
+      const total = agg.reduce((s, v) => s + v, 0) || 1;
       const conf = agg[ci] / total;
       const alts = foodIdx.filter(fi => fi !== ci && !picked.includes(fi))
         .sort((a, b) => agg[b] - agg[a]).slice(0, 3).map(fi => L[fi].name);
 
-      const embs = mine.length ? mine.map(t => before.tiles[t]) : [before.full];
+      // What to remember for learning: this dish's own tiles. If it has none and the plate holds
+      // several dishes, the whole photo would teach the wrong look, so remember nothing.
+      let emb = null;
+      if (mine.length) emb = picked.length === 1 ? mean([before.full].concat(mine.map(t => before.tiles[t]))) : mean(mine.map(t => before.tiles[t]));
+      else if (picked.length === 1) emb = before.full;
       return {
         name: c.name, kcal: c.kcal, g: c.g,
-        before: c.g, after: Math.round(c.g * left),
+        before: grams, after: Math.round(grams * left), portion,
         conf: conf >= 0.45 ? "high" : conf >= 0.22 ? "mid" : "low",
         alts,
-        emb: picked.length === 1 ? mean([before.full].concat(embs)) : mean(embs),
+        emb,
       };
     });
 
-    return { items };
+    return { items, framing };
+  }
+
+  /**
+   * For dishes named by someone else (Claude API mode): which part of the photo is each dish?
+   * Returns one embedding (or null) per name, so API results can teach the offline model too.
+   */
+  function embedFor(classes, before, names) {
+    const L = classes.list;
+    const nonIdx = L.map((c, i) => (c.food ? -1 : i)).filter(i => i >= 0);
+    const idx = names.map(n => L.findIndex(c => c.food && c.name === n));
+    if (names.length === 1) {
+      const foodT = before.tiles.filter(t => L[argmax(probs(classes, t))].food);
+      return [mean([before.full].concat(foodT))];
+    }
+    const known = [...new Set(idx.filter(i => i >= 0))];
+    if (!known.length) return names.map(() => null);
+    const allowed = known.concat(nonIdx);
+    const labels = before.tiles.map(t => argmax(probs(classes, t, allowed)));
+    // Also require the unrestricted best match to agree, so tiles of a dish whose name we
+    // don't know are not forced onto a known dish.
+    // A tile counts only if it clearly shows the dish: its best match is the dish, and the dish
+    // together with its look-alikes (白飯 / 糙米飯 …) holds at least 30% of the probability.
+    const group = ci => L.map((c, k) => (c.food && (k === ci || (c.text && L[ci].text && dot(c.text, L[ci].text) > SAME_DISH)) ? k : -1)).filter(k => k >= 0);
+    const free = before.tiles.map(t => {
+      const p = probs(classes, t), top = argmax(p);
+      if (!L[top].food) return -1;
+      return group(top).reduce((sum, k) => sum + p[k], 0) >= 0.3 ? top : -1;
+    });
+    return idx.map(ci => {
+      if (ci < 0) return null;
+      const mineT = before.tiles.filter((t, k) => labels[k] === ci && free[k] === ci);
+      return mineT.length ? mean(mineT) : null;
+    });
   }
 
   /** Adds a confirmed photo embedding to the user's learned examples (mutates and returns learned). */
@@ -229,8 +309,9 @@
     const s = Math.min(w, h);
     const boxes = [{ x: (w - s) / 2, y: (h - s) / 2, s }];
     const side = s / 3;
-    const cols = Math.max(3, Math.round(w / side));
-    const rows = Math.max(3, Math.round(h / side));
+    // Long panoramas would need many tiles; cap the grid so memory stays small on 4GB phones.
+    const cols = Math.min(MAX_GRID, Math.max(3, Math.round(w / side)));
+    const rows = Math.min(MAX_GRID, Math.max(3, Math.round(h / side)));
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         boxes.push({ x: (c * (w - side)) / (cols - 1), y: (r * (h - side)) / (rows - 1), s: side });
@@ -247,7 +328,7 @@
     return out;
   }
 
-  const api = { buildClasses, analyse, learn, cropBoxes, rgbaToRgb, f32ToB64, b64ToF32, normalize, mean, probs };
+  const api = { buildClasses, analyse, embedFor, learn, cropBoxes, rgbaToRgb, f32ToB64, b64ToF32, normalize, mean, probs };
   root.PlateEngine = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof window !== "undefined" ? window : globalThis);

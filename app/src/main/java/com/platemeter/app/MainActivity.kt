@@ -30,8 +30,11 @@ class MainActivity : Activity() {
         private const val START_URL = "https://appassets.androidplatform.net/assets/index.html"
     }
 
+    private lateinit var embedder: FoodEmbedder
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        cleanOldCaptures()
 
         val assetLoader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
@@ -45,7 +48,8 @@ class MainActivity : Activity() {
             settings.allowContentAccess = true
         }
         setContentView(webView)
-        webView.addJavascriptInterface(FoodEmbedder(this, webView), "PlateNative")
+        embedder = FoodEmbedder(this, webView)
+        webView.addJavascriptInterface(embedder, "PlateNative")
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
@@ -68,25 +72,39 @@ class MainActivity : Activity() {
         else webView.loadUrl(START_URL)
     }
 
+    /**
+     * Removes camera captures older than a day. Never deletes on each chooser open:
+     * the "before" photo must still be readable when the "after" photo is taken.
+     */
+    private fun cleanOldCaptures() {
+        val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+        File(cacheDir, "camera").listFiles()?.forEach { if (it.lastModified() < cutoff) it.delete() }
+    }
+
     /** Offers "take a photo" plus the gallery / file pickers in one chooser. */
     private fun openPhotoChooser(): Boolean {
-        val dir = File(cacheDir, "camera").apply { mkdirs() }
-        dir.listFiles()?.forEach { it.delete() } // drop older captures
-        val file = File.createTempFile("meal_", ".jpg", dir)
-        cameraFile = file
-        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
-        cameraUri = uri
-
-        val camera = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
-            putExtra(MediaStore.EXTRA_OUTPUT, uri)
-            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        // If the camera file can't be prepared, still offer the gallery.
+        val camera: Intent? = try {
+            val dir = File(cacheDir, "camera").apply { mkdirs() }
+            val file = File.createTempFile("meal_", ".jpg", dir)
+            cameraFile = file
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            cameraUri = uri
+            Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                putExtra(MediaStore.EXTRA_OUTPUT, uri)
+                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        } catch (e: Exception) {
+            cameraFile = null
+            cameraUri = null
+            null
         }
         val gallery = Intent(Intent.ACTION_GET_CONTENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "image/*"
         }
         val chooser = Intent.createChooser(gallery, "拍照或選擇照片").apply {
-            putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(camera))
+            if (camera != null) putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(camera))
         }
         return try {
             startActivityForResult(chooser, REQ_PHOTO)
@@ -116,6 +134,15 @@ class MainActivity : Activity() {
             else -> null
         }
         callback.onReceiveValue(result)
+    }
+
+    override fun onDestroy() {
+        fileCallback?.onReceiveValue(null)
+        fileCallback = null
+        embedder.close()
+        webView.removeJavascriptInterface("PlateNative")
+        webView.destroy()
+        super.onDestroy()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

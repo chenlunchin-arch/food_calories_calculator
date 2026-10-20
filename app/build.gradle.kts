@@ -11,8 +11,10 @@ android {
         applicationId = "com.platemeter.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
+        // Phones only: keeps the APK small (ONNX Runtime ships native code per CPU type)
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     buildTypes {

@@ -103,6 +103,14 @@ def main():
             emb = text_embedding(model, tokenizer, [phrase], NONFOOD_TEMPLATES)
             nonfood.append({"id": item["id"], "emb": [round(float(v), 5) for v in emb]})
 
+    # Dishes this close are merged on the phone (SAME_DISH in engine.js); list them in the CI log.
+    embs = np.array([f["emb"] for f in foods])
+    sim = embs @ embs.T
+    close = [(foods[i]["zh"], foods[j]["zh"], sim[i, j]) for i in range(len(foods)) for j in range(i + 1, len(foods)) if sim[i, j] > 0.85]
+    print(f"{len(close)} dish pairs treated as look-alikes (cosine > 0.85):")
+    for a, b, v in sorted(close, key=lambda x: -x[2]):
+        print(f"  {a} / {b}: {v:.3f}")
+
     scale = float(model.logit_scale.exp().item()) if not args.random else 100.0
     labels = {"model": MODEL, "random": args.random, "size": SIZE, "dim": len(foods[0]["emb"]),
               "scale": round(min(scale, 100.0), 3), "foods": foods, "nonfood": nonfood}

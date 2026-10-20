@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>餐盤熱量計</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@600;900&family=IBM+Plex+Mono:wght@500;600&display=swap">
 <style>
 /* Layout: one column app — tabs for 估算 / 今日 / 設定, sticky total bar at the bottom. Porcelain-and-cobalt, like a 青花 plate. */
 :root{
@@ -116,6 +115,7 @@ footer{font-size:12px;color:var(--muted)}
       <div class="row-actions">
         <button class="primary" id="analyze" disabled>用照片估算</button>
         <button id="clearPhotos">清除照片</button>
+        <button id="newMealBtn">新的一餐</button>
       </div>
       <div class="status" id="status"></div>
       <div class="ai-note" id="aiNote" hidden></div>
@@ -203,6 +203,7 @@ const FALLBACK = [["白飯",183,200],["滷肉飯",230,250],["雞腿便當",180,5
 let LABELS = null;          // parsed model/labels.json
 let CLASSES = null;         // PlateEngine.buildClasses(...)
 let learned = store.get("learned", {});
+let mine = store.get("mine", {});     // the user's own kcal / typical serving per dish
 let foodsByName = new Map();
 
 function rebuildFoods(){
@@ -210,13 +211,18 @@ function rebuildFoods(){
   const base = LABELS ? LABELS.foods.map(f => [f.zh, f.kcal, f.g]) : FALLBACK;
   for (const [zh,k,g] of base) foodsByName.set(zh, {k, g});
   for (const [name, l] of Object.entries(learned)) if (!foodsByName.has(name)) foodsByName.set(name, {k:l.kcal, g:l.g, custom:true});
+  for (const [name, m] of Object.entries(mine)) {
+    const f = foodsByName.get(name) || {k:100, g:100, custom:true};
+    foodsByName.set(name, {...f, k: m.k || f.k, g: m.g || f.g});
+  }
   const names = [...foodsByName.keys()];
   $("#pick").innerHTML = `<option value="">從清單加入食物…</option>` +
     names.map(n => `<option>${esc(n)}</option>`).join("") + `<option value="__custom">自訂食物</option>`;
   $("#foodNames").innerHTML = names.map(n => `<option value="${esc(n)}"></option>`).join("");
-  if (LABELS) CLASSES = PlateEngine.buildClasses(LABELS, learned);
-  const n = Object.keys(learned).length;
-  $("#learnedInfo").textContent = n ? `已學過 ${n} 道菜：${Object.keys(learned).slice(0,12).join("、")}${n>12?"…":""}` : "還沒有學過的菜。估算後修正菜名並按「存入今天」，App 就會記住這道菜的樣子。";
+  if (LABELS) CLASSES = PlateEngine.buildClasses(LABELS, learned, mine);
+  const n = Object.keys(learned).length, m = Object.keys(mine).length;
+  $("#learnedInfo").textContent = (n ? `已學過 ${n} 道菜的樣子：${Object.keys(learned).slice(0,12).join("、")}${n>12?"…":""}。` : "還沒有學過的菜。估算後修正菜名並按「存入今天」，App 就會記住這道菜的樣子。")
+    + (m ? ` 另有 ${m} 道菜用你自己改過的熱量或份量。` : "");
 }
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
@@ -233,6 +239,11 @@ const EXAMPLE = () => [
 ];
 let items = EXAMPLE();
 let isExample = true;
+let saved = false;      // this meal is already in today's log
+let mealId = null;      // re-saving an edited meal replaces its entry instead of adding one
+let mealDay = null;
+function markDirty(){ saved = false; }
+function newMeal(){ mealId = "m" + Date.now() + Math.random().toString(36).slice(2, 6); mealDay = null; saved = false; }
 
 function toast(t){
   const el = document.createElement("div"); el.className = "toast"; el.textContent = t;
@@ -255,14 +266,22 @@ function totals(){
   const eaten = items.reduce((s,it)=>s+eatenOf(it)*it.k/100,0);
   return {before, eaten};
 }
-function touched(){ isExample = false; }
+function touched(){ isExample = false; markDirty(); }
 
 // Switch an item to another dish, keeping the share that was left over
 function renameItem(it, name){
   const f = foodsByName.get(name);
   const leftShare = it.before ? Math.min(1, it.after / it.before) : 0;
   it.name = name;
-  if (f) { it.k = f.k; it.before = f.g; it.after = Math.round(f.g * leftShare); }
+  if (f) {
+    it.k = f.k;
+    // Reset grams only for offline guesses the user hasn't typed over; keep Claude's or the user's grams.
+    if (it.portion && !it.gEdited) {
+      it.before = Math.round(f.g * it.portion / 10) * 10 || f.g;
+      it.after = Math.round(it.before * leftShare);
+    }
+  }
+  it.renamed = true;     // the user corrected the name -> safe to learn from
   it.conf = null;
   it.alts = (it.alts || []).filter(a => a !== name);
 }
@@ -294,7 +313,12 @@ function render(){
     el.querySelectorAll("[data-alt]").forEach(b => b.onclick = () => { renameItem(it, b.dataset.alt); touched(); render(); });
     el.querySelectorAll("[data-f]").forEach(inp => {
       inp.value = r(it[inp.dataset.f]);
-      inp.onchange = () => { it[inp.dataset.f] = num(inp.value); touched(); render(); };
+      inp.onchange = () => {
+        it[inp.dataset.f] = num(inp.value);
+        if (inp.dataset.f === "k") it.kEdited = true;
+        if (inp.dataset.f === "before") it.gEdited = true;
+        touched(); render();
+      };
     });
     el.querySelector(".del").onclick = () => { items.splice(i,1); touched(); render(); };
     el.querySelectorAll(".quick button").forEach(b => b.onclick = () => { it.after = it.before * Number(b.dataset.p); touched(); render(); });
@@ -309,6 +333,8 @@ function render(){
 $("#addBtn").onclick = () => {
   const v = $("#pick").value; if(!v) return;
   if(isExample){ items = []; isExample = false; }
+  if(!items.length) newMeal();   // adding to an empty list starts a new meal
+  markDirty();
   if(v === "__custom") items.push({name:"自訂食物",k:100,before:100,after:0});
   else { const f = foodsByName.get(v); items.push({name:v,k:f.k,before:f.g,after:0}); }
   $("#pick").value = ""; render();
@@ -317,8 +343,11 @@ $("#addBtn").onclick = () => {
 /* ---------- photos ---------- */
 const files = {before:null, after:null};
 function bindDrop(key, inputId, dropId){
-  $(inputId).onchange = e => {
-    const f = e.target.files[0]; if(!f) return;
+  $(inputId).onchange = async e => {
+    const picked = e.target.files[0]; if(!picked) return;
+    let f;
+    try { f = new Blob([await picked.arrayBuffer()], {type: picked.type || "image/jpeg"}); }
+    catch { setStatus("照片無法讀取，請重新拍一次。", true); return; }
     files[key] = f;
     const d = $(dropId); d.querySelector("img")?.remove();
     const img = document.createElement("img"); img.alt = key === "before" ? "飯前照片" : "飯後照片";
@@ -329,6 +358,12 @@ function bindDrop(key, inputId, dropId){
 }
 bindDrop("before","#fileBefore","#dropBefore");
 bindDrop("after","#fileAfter","#dropAfter");
+$("#newMealBtn").onclick = () => {
+  if (saving) { toast("正在記住上一餐，請稍候"); return; }
+  $("#clearPhotos").click();
+  items = []; isExample = false; newMeal(); render();
+  setStatus("已清空，可以開始記錄新的一餐。");
+};
 $("#clearPhotos").onclick = () => {
   files.before = files.after = null;
   ["#dropBefore","#dropAfter"].forEach(id => { const d=$(id); d.querySelector("img")?.remove(); d.querySelector(".hint").hidden=false; d.querySelector("input").value=""; });
@@ -368,18 +403,32 @@ window.__plateEmbed = (id, res) => {
   else p.reject(new Error((res && res.error) || "model"));
 };
 let seq = 0;
-function embedNative(rgb){
+function embedBatch(rgb){
   let bin = "";
   for (let i = 0; i < rgb.length; i += 0x8000) bin += String.fromCharCode.apply(null, rgb.subarray(i, i + 0x8000));
   const id = "e" + (++seq);
   return new Promise((resolve, reject) => {
-    pending.set(id, {resolve, reject});
+    // first call also loads the model, so allow longer
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error("timeout")); }, seq === 1 ? 180000 : 90000);
+    pending.set(id, {
+      resolve: v => { clearTimeout(timer); resolve(v); },
+      reject: e => { clearTimeout(timer); reject(e); }
+    });
     PlateNative.embed(id, btoa(bin));
   });
 }
+// 4 crops per call keeps phone memory low (about 3MB of pixels at a time)
+async function embedNative(rgb, perCrop, onProgress){
+  const n = rgb.length / perCrop, out = [];
+  for (let i = 0; i < n; i += 4) {
+    out.push(...await embedBatch(rgb.subarray(i * perCrop, Math.min(n, i + 4) * perCrop)));
+    onProgress && onProgress(Math.min(n, i + 4), n);
+  }
+  return out;
+}
 
 // Cuts the photo into the whole view + a grid of tiles and gets an embedding for each
-async function embedPhoto(file){
+async function embedPhoto(file, label){
   const img = await loadImage(file);
   const scale = Math.min(1, 1024 / Math.max(img.naturalWidth, img.naturalHeight));
   const src = document.createElement("canvas");
@@ -399,19 +448,24 @@ async function embedPhoto(file){
     tctx.drawImage(src, b.x, b.y, b.s, b.s, 0, 0, S, S);
     PlateEngine.rgbaToRgb(tctx.getImageData(0, 0, S, S).data, rgb, k * S * S * 3);
   });
-  const embs = await embedNative(rgb);
+  const embs = await embedNative(rgb, S * S * 3, (done, n) => setStatus(`辨識${label}中… ${Math.round(done / n * 100)}%`));
   return {full: embs[0], tiles: embs.slice(1)};
 }
 
 async function analyzeOffline(){
   setStatus("辨識飯前照片中…");
-  const before = await embedPhoto(files.before);
+  const before = await embedPhoto(files.before, "飯前照片");
   let after = null;
-  if (files.after) { setStatus("辨識飯後照片中…"); after = await embedPhoto(files.after); }
+  if (files.after) after = await embedPhoto(files.after, "飯後照片");
   const res = PlateEngine.analyse(CLASSES, before, after);
-  items = res.items.map(x => ({name:x.name, k:x.kcal, before:x.before, after:x.after, conf:x.conf, alts:x.alts, emb:x.emb}));
-  isExample = false; render();
-  $("#aiNote").textContent = "離線辨識的菜名和份量是粗估。菜名不對請點「也可能是」或直接改名；份量不對請改公克數。按「存入今天」後，App 會記住你修正過的菜。";
+  if (res.noFood) {
+    setStatus("飯前照片裡沒看到食物。請讓餐點佔畫面大部分再拍一次，或用下方清單手動加入。", true);
+    return;
+  }
+  items = res.items.map(x => ({name:x.name, k:x.kcal, before:x.before, after:x.after, conf:x.conf, alts:x.alts, emb:x.emb, portion:x.portion}));
+  isExample = false; newMeal(); render();
+  $("#aiNote").textContent = (res.framing ? "飯前、飯後拍的距離或角度差很多，剩下的比例可能不準，請確認。" : "")
+    + "菜名和份量是粗估：份量依每道菜佔盤面的比例換算。菜名不對請點「也可能是」或直接改名，公克數不對請直接改。按「存入今天」後，App 會記住你改過的菜和把握高的菜。";
   $("#aiNote").hidden = false;
   setStatus("辨識完成，請確認下方的菜名和份量。");
 }
@@ -444,9 +498,10 @@ async function analyzeApi(){
 - after_g：用餐後剩下的重量（公克）${both ? "，完全沒剩就是 0" : "，一律填 0"}
 - kcal_per_100g：以台灣常見做法估計的每 100 公克熱量
 - confidence："high"、"mid" 或 "low"
+- alts：最多 3 個外觀相似、也可能是的其他菜名
 以餐具、碗盤大小作為比例參考。食物名稱用繁體中文。
 只回覆 JSON，不要其他文字，格式：
-{"items":[{"name":"滷肉飯","before_g":250,"after_g":40,"kcal_per_100g":230,"confidence":"mid"}],"note":"一句話說明估算依據或注意事項"}`;
+{"items":[{"name":"滷肉飯","before_g":250,"after_g":40,"kcal_per_100g":230,"confidence":"mid","alts":["肉燥飯","控肉飯"]}],"note":"一句話說明估算依據或注意事項"}`;
   const imgs = both ? [files.before, files.after] : [files.before];
   const content = [];
   for (const [i, f] of imgs.entries()) {
@@ -469,24 +524,31 @@ async function analyzeApi(){
   const data = parseJson(text);
   const list = Array.isArray(data?.items) ? data.items : [];
   if(!list.length) throw new Error("照片裡沒有辨識到食物，請換一張或手動加入。");
+  const photo = files.before;
   items = list.map(x => ({
-    name: String(x.name || "食物"), before: num(x.before_g), after: num(x.after_g), k: num(x.kcal_per_100g),
-    conf: ["high","mid","low"].includes(x.confidence) ? x.confidence : null
+    api: true, photo,
+    name: String(x.name || "食物"), before: num(x.before_g), after: num(x.after_g),
+    k: (mine[String(x.name)] && mine[String(x.name)].k) || num(x.kcal_per_100g),   // your own kcal wins
+    conf: ["high","mid","low"].includes(x.confidence) ? x.confidence : null,
+    alts: Array.isArray(x.alts) ? x.alts.map(String).filter(a => a && a !== x.name).slice(0, 3) : []
   }));
-  isExample = false; render();
+  isExample = false; newMeal(); render();
   $("#aiNote").textContent = data.note ? String(data.note) : "";
   $("#aiNote").hidden = !data.note;
+
   setStatus("估算完成，可以直接修改下方的數字。");
 }
 
 $("#analyze").onclick = async () => {
+  if (saving) { toast("正在記住上一餐，請稍候"); return; }
   busy = true; $("#analyze").disabled = true;
   try {
     if (mode() === "api") await analyzeApi(); else await analyzeOffline();
   } catch(e) {
-    const offline = e instanceof TypeError;
+    const offline = mode() === "api" && e instanceof TypeError;
     setStatus(offline ? "連不上網路，請確認網路後再試。"
-      : e.message === "image" ? "照片無法讀取，請換一張。"
+      : e.message === "image" ? "照片無法讀取。請改用相機拍攝，或選 JPG 格式的照片。"
+      : e.message === "timeout" ? "辨識太久沒有回應，請關掉其他 App 後再試一次。"
       : /OutOfMemory|memory/i.test(e.message) ? "手機記憶體不足，請關掉其他 App 後再試。"
       : e.message.startsWith("估算") || /[一-鿿]/.test(e.message) ? e.message
       : "辨識失敗，請再試一次或手動輸入。", true);
@@ -495,26 +557,72 @@ $("#analyze").onclick = async () => {
 
 /* ---------- today log + learning ---------- */
 const dayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-$("#saveMeal").onclick = () => {
+let saving = false;
+$("#saveMeal").onclick = async () => {
+  if (saving) return;
   if(!items.length){ toast("這餐還沒有食物"); return; }
   if(isExample){ toast("這是範例資料，請先拍照或加入食物"); return; }
+  if(saved){ toast("這餐已經存過了"); return; }
+  const meal = items.slice();   // the user may start the next meal while learning runs
+  if(!mealId) newMeal();
   const log = store.get("log", {});
-  const k = dayKey();
-  (log[k] ||= []).push({ time: new Date().toTimeString().slice(0,5), kcal: r(totals().eaten), foods: items.map(it => it.name).join("、") });
+  const entry = { id: mealId, time: new Date().toTimeString().slice(0,5), kcal: r(totals().eaten), foods: meal.map(it => it.name).join("、") };
+  const day = mealDay || dayKey();
+  const list = (log[day] ||= []);
+  const at = list.findIndex(m => m.id === mealId);
+  const updated = at >= 0;
+  if (updated) { entry.time = list[at].time; list[at] = entry; } else list.push(entry);
+  mealDay = day;
   store.set("log", log);
 
-  // Remember what each confirmed dish looks like
-  let taught = 0;
-  for (const it of items) {
-    if (!it.emb || !it.name.trim()) continue;
-    PlateEngine.learn(learned, it.name.trim(), it.k, it.before || 100, it.emb);
-    it.emb = null; taught++;
+  saved = true;
+  toast(updated ? `已更新這餐：${r(totals().eaten)} 大卡` : `已存入今天：${r(totals().eaten)} 大卡`);
+
+  // Remember the user's own calories / typical serving for dishes they edited.
+  // Serving moves 30% toward the new value, so one unusual meal doesn't reset the default.
+  let changed = 0;
+  for (const it of meal) {
+    const name = it.name.trim();
+    if (!name || !(it.kEdited || it.gEdited)) continue;
+    const m = mine[name] || {};
+    if (it.kEdited) m.k = it.k;
+    if (it.gEdited && it.before > 0) {
+      const now = it.before / (it.portion || 1);
+      const old = m.g || (foodsByName.get(name) || {}).g || now;
+      m.g = Math.max(10, Math.round((old + 0.3 * (now - old)) / 10) * 10);
+    }
+    mine[name] = m; it.kEdited = it.gEdited = false; changed++;
   }
-  if (taught) {
-    if (!store.set("learned", learned)) toast("儲存空間不足，這次沒有記住菜的樣子");
+  const learnable = it => it.name.trim() && (it.renamed || it.conf === "high");
+  // Claude API results: run the phone model now, only if something will be learned
+  const apiItems = meal.filter(it => it.api && !it.emb && !it.learned && learnable(it));
+  const photo = apiItems.length && apiItems[0].photo;
+  if (photo && offlineReady() && apiItems.every(it => it.photo === photo)) {
+    saving = true;
+    try {
+      setStatus("讓手機上的模型一起學習中…");
+      const target = meal.filter(it => it.api && it.photo === photo);
+      const names = target.map(it => it.name.trim());
+      const before = await embedPhoto(photo, "飯前照片");
+      const embs = PlateEngine.embedFor(CLASSES, before, names);
+      // skip any dish the user renamed while the model was running
+      target.forEach((it, i) => { if (it.name.trim() === names[i]) it.emb = embs[i]; });
+      setStatus("已記住這餐的菜。");
+    } catch { setStatus("這次沒能讓手機模型學習，下次再試。"); }
+    finally { saving = false; }
+  }
+  // Remember what each dish looks like: only names the user corrected, or confident guesses
+  for (const it of meal) {
+    const name = it.name.trim();
+    if (!it.emb || !learnable(it)) continue;
+    const base = foodsByName.get(name);
+    PlateEngine.learn(learned, name, it.k, base ? base.g : (it.before || 100), it.emb);
+    it.emb = null; it.learned = true; changed++;
+  }
+  if (changed) {
+    if (!store.set("learned", learned) || !store.set("mine", mine)) toast("儲存空間不足，這次沒有記住菜的樣子");
     rebuildFoods();
   }
-  toast(`已存入今天：${r(totals().eaten)} 大卡`);
 };
 function renderToday(){
   const k = dayKey(), log = store.get("log", {}), meals = log[k] || [];
@@ -538,7 +646,11 @@ function syncSettings(){
   $(mode() === "api" ? "#modeApi" : "#modeOffline").checked = true;
   $("#apiCard").hidden = mode() !== "api";
 }
-document.querySelectorAll('input[name="mode"]').forEach(rb => rb.onchange = () => { $("#apiCard").hidden = !$("#modeApi").checked; });
+document.querySelectorAll('input[name="mode"]').forEach(rb => rb.onchange = () => {
+  store.set("mode", $("#modeApi").checked ? "api" : "offline");
+  $("#apiCard").hidden = !$("#modeApi").checked;
+  updateAnalyze();
+});
 $("#apiKey").value = store.get("apiKey","");
 $("#model").value = store.get("model","claude-haiku-5-5");
 $("#saveKey").onclick = () => {
@@ -552,7 +664,7 @@ $("#saveKey").onclick = () => {
 let forgetArmed = false;
 $("#forgetBtn").onclick = () => {
   if (!forgetArmed) { forgetArmed = true; $("#forgetBtn").textContent = "再按一次確認清除"; setTimeout(() => { forgetArmed = false; $("#forgetBtn").textContent = "清除學習紀錄"; }, 3000); return; }
-  learned = {}; store.set("learned", learned); rebuildFoods();
+  learned = {}; mine = {}; store.set("learned", learned); store.set("mine", mine); rebuildFoods();
   forgetArmed = false; $("#forgetBtn").textContent = "清除學習紀錄";
   $("#forgetStatus").textContent = "已清除";
   setTimeout(() => $("#forgetStatus").textContent = "", 1500);
